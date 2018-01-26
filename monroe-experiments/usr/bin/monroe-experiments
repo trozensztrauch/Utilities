@@ -282,6 +282,52 @@ if [ -z "$(docker ps --no-trunc|grep $URL_MPLANE)" ]; then
   logger -t monroe-experiments "started mplane container.";
 fi
 
+NEAT_PROXY_ENABLED=$(cat /monroe/neat-proxy/enabled || echo 0)
+CID_PROXY=$(docker ps --no-trunc | grep $URL_NEAT_PROXY | awk '{print $1}' | head -n 1)
+echo "TORO: neat-proxy:"
+echo $CID_PROXY
+if [ $NEAT_PROXY_ENABLED -eq 1 ]; then
+  echo "neat-proxy enabled"
+  # Configure and start neat-proxy container if not running
+  if [ -z "$CID_PROXY" ]; then
+    ip rule del fwmark 1 lookup 100 || true
+    ip rule add fwmark 1 lookup 100 || true
+    ip route flush table 100 || true
+    ip route add local 0.0.0.0/0 dev lo table 100
+
+    for IF in $INTERFACES_BR; do
+      if [ -z "$(ip link|grep ${IF}Br:)" ]; then
+        # Firewall rules to set up TPROXY
+        IPRANGE=$(ifnum $IF)
+        TARGET="/etc/circle.d/60-$IF-neat-proxy.rules"
+        RULES="\
+\${ipt4} -A INPUT -p tcp -s ${IPRANGE}.0/24 -j ACCEPT
+\${ipt4} -t mangle -A PREROUTING -p tcp -i ${IF}Br -j TPROXY --tproxy-mark 0x1/0x1 --on-port 9876"
+        echo "$RULES" > $TARGET
+        circle start
+      fi
+    done
+    mkdir -p $BASEDIR/neat-proxy
+    rm $BASEDIR/neat-proxy/* || true;
+    docker run -d --net=host \
+               -v $BASEDIR/neat-proxy:/monroe/results \
+               $URL_NEAT_PROXY || true;
+    echo "started neat-proxy"
+    logger -t monroe-experiments "started neat-proxy container.";
+  fi
+else # neat-proxy disabled
+  echo "neat-proxy disabled"
+  if [ -n "$CID_PROXY" ]; then
+    docker stop -t 0 $CID_PROXY || true
+    ip rule del fwmark 1 lookup 100 || true
+    ip route flush table 100 || true
+    find /etc/circle.d -name "60-*-neat-proxy.rules" -delete
+    circle start
+    echo "stopped neat-proxy"
+    logger -t monroe-experiments "stopped neat-proxy container.";
+  fi
+fi
+
 monroe-rsync-results     || true
 monroe-user-experiments  || true
 
